@@ -8,6 +8,9 @@ import requests
 import telegram
 from dotenv import load_dotenv
 
+from exceptions import NegativeResponseError
+
+
 load_dotenv()
 
 
@@ -26,20 +29,6 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    filename='program.log'
-)
-logger = logging.getLogger('app_logger')
-std_format = logging.Formatter(
-    fmt='{asctime} - {levelname} - {name} - {message}',
-    style='{'
-)
-
-console_handler = logging.StreamHandler(sys.stdout)
-logger.addHandler(console_handler)
-console_handler.setFormatter(std_format)
-
 
 def check_tokens():
     """Проверяет доступность переменных окружения."""
@@ -54,9 +43,9 @@ def send_message(bot, message):
             chat_id=TELEGRAM_CHAT_ID,
             text=message,
         )
-        logger.debug('Сообщение отправлено.')
+        logging.debug('Сообщение отправлено.')
     except Exception:
-        logger.error('Сообщение не отправлено.')
+        logging.error('Сообщение не отправлено.')
 
 
 def get_api_answer(current_timestamp):
@@ -69,16 +58,17 @@ def get_api_answer(current_timestamp):
             headers=HEADERS,
             params=params
         )
-        logger.info('Запрос на сервер отправлен.')
-    except Exception:
-        logger.error('Запрос на сервер не отправлен.')
+        logging.info('Запрос на сервер отправлен.')
+    except Exception as error:
+        raise NegativeResponseError(f'Запрос на сервер не отправлен. {error}.')
+
     if response.status_code != HTTPStatus.OK:
-        raise logger.error('Не удалось получить ответ API'
-                           f'error-status: {response.status_code}.')
+        raise logging.error('Не удалось получить ответ API'
+                            f'error-status: {response.status_code}.')
     try:
         return response.json()
     except Exception:
-        raise logger.error('Ответ от сервера не в json формате.')
+        raise logging.error('Ответ от сервера не в json формате.')
 
 
 def check_response(response):
@@ -86,12 +76,15 @@ def check_response(response):
     if not isinstance(response, dict):
         raise TypeError('Ответ на запрос не является словарем.')
     if 'homeworks' not in response:
-        logger.error('В ответе API нет ключа homeworks.')
         raise KeyError('В ответе API нет ключа homeworks.')
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
         raise TypeError('Homeworks не является списком.')
-    return homeworks[0]
+    try:
+        homework = homeworks[0]
+    except IndexError:
+        raise IndexError('Список домашних работ пуст.')
+    return homework
 
 
 def parse_status(homework):
@@ -116,26 +109,51 @@ def main():
 
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     previous_homework_time = PREVIOUS_HOMEWORK_TIME_JSON
-    STATUS = ''
+    status = ''
+    current_timestamp = int(time.time())
+
+    if not get_api_answer(current_timestamp):
+        logging.error('Запрос на сервер не отправлен.')
 
     while True:
         try:
             response = get_api_answer(previous_homework_time)
             new_status = parse_status(check_response(response))
-            if new_status != STATUS:
+            if new_status != status:
                 send_message(bot, new_status)
-                if STATUS != '':
+                if status != '':
                     previous_homework_time = int(time.time())
-                STATUS = new_status
+                status = new_status
             else:
-                logger.debug('Статус домашней работы не изменился.')
+                logging.debug('Статус домашней работы не изменился.')
         except Exception as error:
             message = f'Сбой в работе программы: {error}.'
-            logger.error(message)
+            logging.error(message)
             send_message(bot, message)
+        try:
+            get_api_answer(response)
+        except KeyError as error:
+            message = f'В ответе API нет ключа homeworks. {error}.'
+            logging.error(message)
 
-        time.sleep(RETRY_PERIOD)
+        finally:
+            time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(
+        level=logging.DEBUG,
+        filename='program.log'
+    )
+    logger = logging.getLogger('app_logger')
+    logger.setLevel(logging.DEBUG)
+    std_format = logging.Formatter(
+        '{asctime} - {levelname} - {name} - {message} - {funcName} - {lineno}',
+        style='{'
+    )
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    logger.addHandler(console_handler)
+    console_handler.setFormatter(std_format)
+
     main()
